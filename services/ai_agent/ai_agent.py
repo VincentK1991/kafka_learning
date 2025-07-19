@@ -3,20 +3,26 @@
 AI Agent Service - Processes pending AI requests using OpenAI
 """
 
+import asyncio
+import contextlib
 import logging
 import os
-import threading
 import time
 from typing import Any
 
 import openai
 import uvicorn
 from dotenv import load_dotenv
-from fastapi import FastAPI, Response
+from fastapi import Depends, FastAPI, Response
 from fastapi.middleware.cors import CORSMiddleware
 
 from shared.config import Config
-from shared.consumer import DatabaseManager
+from shared.database import (
+    AsyncDatabaseConnector,
+    close_connection_pool,
+    get_db,
+    get_db_dependency,
+)
 from shared.models import HealthResponse
 
 load_dotenv()
@@ -38,7 +44,7 @@ app = FastAPI(
 )
 
 startup_time = time.time()
-processing_thread = None
+processing_task = None
 processing_running = False
 
 
@@ -52,11 +58,10 @@ app.add_middleware(
 )
 
 
-class AIAgent:
-    """AI Agent for processing requests"""
+class AsyncAIAgent:
+    """AI Agent for processing requests with async database operations"""
 
     def __init__(self):
-        self.db_manager = None
         self.openai_client = None
         self.running = False
         self.processed_count = 0
@@ -65,42 +70,28 @@ class AIAgent:
         # Initialize OpenAI client
         api_key = os.getenv("OPENAI_API_KEY")
         if not api_key:
-            logger.error("OPENAI_API_KEY environment variable not set")
-            raise ValueError("OpenAI API key is required")
+            logger.warning("OPENAI_API_KEY environment variable not set")
+            # Don't raise error to allow service to start without OpenAI
+        else:
+            self.openai_client = openai.OpenAI(api_key=api_key)
 
-        self.openai_client = openai.OpenAI(api_key=api_key)
-
-    def connect(self):
-        """Connect to database"""
-        try:
-            self.db_manager = DatabaseManager()
-            # AI_AGENT_HEALTH.set(1)  # Metrics disabled
-            logger.info("AI Agent connected to database successfully")
-        except Exception as e:
-            # AI_AGENT_HEALTH.set(0)  # Metrics disabled
-            logger.error(f"Failed to connect to database: {e}")
-            raise
-
-    def disconnect(self):
-        """Disconnect from database"""
-        self.running = False
-        if self.db_manager:
-            self.db_manager.close()
-        # AI_AGENT_HEALTH.set(0)  # Metrics disabled
-        logger.info("AI Agent disconnected")
-
-    def process_ai_request(self, request: dict[str, Any]) -> None:
-        """Process a single AI request"""
+    async def process_ai_request(
+        self, request: dict[str, Any], db: AsyncDatabaseConnector
+    ) -> None:
+        """Process a single AI request with async database operations"""
         request_id = request["request_id"]
         start_time = time.time()
 
         try:
             # Mark as processing
-            self.db_manager.update_ai_request_status(request_id, "processing")
+            await db.update_ai_request_status(request_id, "processing")
 
             logger.info(
                 f"Processing AI request {request_id}: {request['question'][:100]}..."
             )
+
+            if not self.openai_client:
+                raise Exception("OpenAI client not configured")
 
             # Prepare the prompt
             messages = [
@@ -134,7 +125,7 @@ class AIAgent:
                 processing_time = time.time() - start_time
 
                 # Update as completed
-                self.db_manager.update_ai_request_status(
+                await db.update_ai_request_status(
                     request_id,
                     "completed",
                     answer=answer,
@@ -151,7 +142,7 @@ class AIAgent:
                 error_msg = f"OpenAI API error: {str(e)}"
                 processing_time = time.time() - start_time
 
-                self.db_manager.update_ai_request_status(
+                await db.update_ai_request_status(
                     request_id,
                     "failed",
                     error_message=error_msg,
@@ -167,48 +158,49 @@ class AIAgent:
             error_msg = f"Processing error: {str(e)}"
 
             try:
-                self.db_manager.update_ai_request_status(
+                await db.update_ai_request_status(
                     request_id,
                     "failed",
                     error_message=error_msg,
                     processing_time=processing_time,
                 )
-            except Exception as e:
-                logger.error(f"Failed to update AI request status in database: {e}")
-                pass  # Don't fail if we can't update the database
+            except Exception as db_error:
+                logger.error(
+                    f"Failed to update AI request status in database: {db_error}"
+                )
 
             self.error_count += 1
 
             logger.error(f"Error processing AI request {request_id}: {e}")
 
-    def start_processing(self):
-        """Start processing pending AI requests"""
-        if not self.db_manager:
-            raise Exception("AI Agent not connected to database")
-
+    async def start_processing(self):
+        """Start processing pending AI requests with async operations"""
         self.running = True
         logger.info("AI Agent started processing...")
 
         while self.running:
             try:
+                # Get database connection
+                db = await get_db()
+
                 # Get pending requests
-                pending_requests = self.db_manager.get_pending_ai_requests(limit=5)
+                pending_requests = await db.get_pending_ai_requests(limit=5)
 
                 if pending_requests:
                     logger.info(f"Found {len(pending_requests)} pending AI requests")
 
-                    # Process requests sequentially to avoid async issues
+                    # Process requests sequentially to avoid overwhelming OpenAI API
                     for request in pending_requests:
                         if not self.running:
                             break
-                        self.process_ai_request(request)
+                        await self.process_ai_request(request, db)
                 else:
                     # No pending requests, wait a bit
-                    time.sleep(5)
+                    await asyncio.sleep(5)
 
             except Exception as e:
                 logger.error(f"Error in processing loop: {e}")
-                time.sleep(10)  # Wait longer on error
+                await asyncio.sleep(10)  # Wait longer on error
 
         logger.info("AI Agent stopped processing")
 
@@ -218,17 +210,17 @@ class AIAgent:
 
 
 # Global AI agent
-ai_agent = AIAgent()
+ai_agent = AsyncAIAgent()
 
 
-def run_ai_agent():
-    """Run AI agent in background thread"""
+async def run_ai_agent():
+    """Run AI agent processing loop"""
     global processing_running
     processing_running = True
     try:
-        ai_agent.start_processing()
+        await ai_agent.start_processing()
     except Exception as e:
-        logger.error(f"AI agent thread error: {e}")
+        logger.error(f"AI agent error: {e}")
     finally:
         processing_running = False
 
@@ -236,15 +228,12 @@ def run_ai_agent():
 @app.on_event("startup")
 async def startup_event():
     """Initialize the application"""
-    global processing_thread
+    global processing_task
     logger.info("Starting AI Agent service...")
 
     try:
-        ai_agent.connect()
-
-        # Start processing in background thread
-        processing_thread = threading.Thread(target=run_ai_agent, daemon=True)
-        processing_thread.start()
+        # Start processing in background task
+        processing_task = asyncio.create_task(run_ai_agent())
 
     except Exception as e:
         logger.error(f"Failed to start AI agent: {e}")
@@ -257,7 +246,14 @@ async def shutdown_event():
     logger.info("Shutting down AI Agent service...")
 
     ai_agent.stop_processing()
-    ai_agent.disconnect()
+
+    # Cancel the processing task
+    if processing_task:
+        processing_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await processing_task
+
+    await close_connection_pool()
     processing_running = False
 
 
@@ -265,14 +261,23 @@ async def shutdown_event():
 
 
 @app.get("/health", response_model=HealthResponse, tags=["Health"])
-async def health_check():
-    """Health check endpoint"""
+async def health_check(db: AsyncDatabaseConnector = Depends(get_db_dependency)):
+    """Health check endpoint with async database test"""
     uptime = time.time() - startup_time
 
+    try:
+        # Test database connectivity
+        result = await db.execute_query("SELECT 1 as test", fetch_mode="one")
+        db_healthy = result is not None
+    except Exception as e:
+        logger.error(f"Database health check failed: {e}")
+        db_healthy = False
+
     checks = {
-        "database_connected": ai_agent.db_manager is not None,
+        "database_connected": db_healthy,
         "openai_configured": ai_agent.openai_client is not None,
         "processing_running": processing_running,
+        "connection_pool": True,
     }
 
     all_healthy = all(checks.values())
@@ -290,11 +295,11 @@ async def metrics():
 
 
 @app.get("/status", tags=["Status"])
-async def get_status():
-    """Get AI agent status"""
+async def get_status(db: AsyncDatabaseConnector = Depends(get_db_dependency)):
+    """Get AI agent status with async database operations"""
     pending_count = 0
     try:
-        pending_requests = ai_agent.db_manager.get_pending_ai_requests(limit=1000)
+        pending_requests = await db.get_pending_ai_requests(limit=1000)
         pending_count = len(pending_requests)
     except Exception as e:
         logger.error(f"Failed to get pending AI requests count: {e}")
@@ -320,11 +325,10 @@ async def pause_processing():
 @app.post("/admin/resume", tags=["Admin"])
 async def resume_processing():
     """Resume AI request processing"""
-    global processing_thread, processing_running
+    global processing_task, processing_running
 
     if not processing_running:
-        processing_thread = threading.Thread(target=run_ai_agent, daemon=True)
-        processing_thread.start()
+        processing_task = asyncio.create_task(run_ai_agent())
         return {"message": "AI processing resumed", "status": "running"}
     else:
         return {"message": "AI processing already running", "status": "running"}

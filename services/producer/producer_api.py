@@ -18,7 +18,11 @@ from kafka import KafkaProducer
 from kafka.errors import KafkaError
 
 from shared.config import Config
-from shared.consumer import DatabaseManager
+from shared.database import (
+    AsyncDatabaseConnector,
+    close_connection_pool,
+    get_db_dependency,
+)
 from shared.models import (
     AIRequestProperties,
     AIRequestResponse,
@@ -63,17 +67,15 @@ app.add_middleware(
 )
 
 
-class ProducerManager:
-    """Manages Kafka producer and database connections"""
+class AsyncProducerManager:
+    """Manages Kafka producer connections (database managed by pool)"""
 
     def __init__(self):
         self.producer = None
-        self.db_manager = None
         self.connected = False
-        self.db_connected = False
 
     def connect(self):
-        """Connect to Kafka and Database"""
+        """Connect to Kafka (database connections managed by pool)"""
         try:
             # Connect to Kafka
             self.producer = KafkaProducer(
@@ -88,28 +90,17 @@ class ProducerManager:
             self.connected = True
             logger.info("Connected to Kafka successfully")
 
-            # Connect to Database
-            self.db_manager = DatabaseManager()
-            self.db_connected = True
-            logger.info("Connected to database successfully")
-
         except Exception as e:
             self.connected = False
-            self.db_connected = False
-            logger.error(f"Failed to connect: {e}")
+            logger.error(f"Failed to connect to Kafka: {e}")
             raise
 
     def disconnect(self):
-        """Disconnect from Kafka and Database"""
+        """Disconnect from Kafka"""
         if self.producer:
             self.producer.close()
             self.connected = False
             logger.info("Disconnected from Kafka")
-
-        if self.db_manager:
-            self.db_manager.close()
-            self.db_connected = False
-            logger.info("Disconnected from database")
 
     def send_event(self, event: dict[str, Any]) -> bool:
         """Send event to Kafka"""
@@ -143,7 +134,7 @@ class ProducerManager:
 
 
 # Global producer manager
-producer_manager = ProducerManager()
+producer_manager = AsyncProducerManager()
 
 
 @app.on_event("startup")
@@ -158,9 +149,10 @@ async def shutdown_event():
     """Cleanup on shutdown"""
     logger.info("Shutting down Producer API server...")
     producer_manager.disconnect()
+    await close_connection_pool()
 
 
-def get_producer_manager() -> ProducerManager:
+def get_producer_manager() -> AsyncProducerManager:
     """Dependency to get producer manager"""
     return producer_manager
 
@@ -169,15 +161,23 @@ def get_producer_manager() -> ProducerManager:
 
 
 @app.get("/health", response_model=HealthResponse, tags=["Health"])
-async def health_check():
-    """Health check endpoint"""
+async def health_check(db: AsyncDatabaseConnector = Depends(get_db_dependency)):
+    """Health check endpoint with async database test"""
     uptime = time.time() - startup_time
+
+    try:
+        # Test database connectivity
+        result = await db.execute_query("SELECT 1 as test", fetch_mode="one")
+        db_healthy = result is not None
+    except Exception as e:
+        logger.error(f"Database health check failed: {e}")
+        db_healthy = False
 
     checks = {
         "kafka_connected": producer_manager.connected,
-        "database_connected": producer_manager.db_connected,
+        "database_connected": db_healthy,
         "producer_initialized": producer_manager.producer is not None,
-        "db_manager_initialized": producer_manager.db_manager is not None,
+        "connection_pool": True,
     }
 
     all_healthy = all(checks.values())
@@ -197,11 +197,9 @@ async def metrics():
 @app.post("/events", response_model=EventResponse, tags=["Events"])
 async def ingest_event(
     event_data: dict[str, Any],
-    producer_mgr: ProducerManager = Depends(get_producer_manager),
+    producer_mgr: AsyncProducerManager = Depends(get_producer_manager),
 ):
     """Ingest a single event"""
-
-    # with EVENTS_PROCESSING_TIME.time():  # Metrics disabled
     try:
         # Add event_id if not provided
         if "event_id" not in event_data:
@@ -227,20 +225,16 @@ async def ingest_event(
 
     except ValueError as e:
         logger.error(f"Validation error: {e}")
-        # EVENTS_RECEIVED.labels(
-        #     event_type="unknown", status="validation_error"
-        # ).inc()
         raise HTTPException(status_code=400, detail=f"Validation error: {str(e)}")
     except Exception as e:
         logger.error(f"Error processing event: {e}")
-        # EVENTS_RECEIVED.labels(event_type="unknown", status="error").inc()
         raise HTTPException(status_code=500, detail=f"Internal error: {str(e)}")
 
 
 @app.post("/events/batch", response_model=BatchEventResponse, tags=["Events"])
 async def ingest_batch_events(
     events: list[dict[str, Any]],
-    producer_mgr: ProducerManager = Depends(get_producer_manager),
+    producer_mgr: AsyncProducerManager = Depends(get_producer_manager),
 ):
     """Ingest multiple events in batch"""
 
@@ -253,7 +247,6 @@ async def ingest_batch_events(
     failed_count = 0
     failed_events = []
 
-    # with EVENTS_PROCESSING_TIME.time():  # Metrics disabled
     for i, event_data in enumerate(events):
         try:
             # Add event_id if not provided
@@ -292,7 +285,7 @@ async def ingest_batch_events(
 async def generate_sample_event(
     event_type: str = "page_view",
     user_id: int = None,
-    producer_mgr: ProducerManager = Depends(get_producer_manager),
+    producer_mgr: AsyncProducerManager = Depends(get_producer_manager),
 ):
     """Generate and ingest a sample event (for testing/development)"""
 
@@ -350,13 +343,10 @@ async def generate_sample_event(
 async def submit_ai_request(
     ai_request: AIRequestProperties,
     user_id: int,
-    producer_mgr: ProducerManager = Depends(get_producer_manager),
+    producer_mgr: AsyncProducerManager = Depends(get_producer_manager),
+    db: AsyncDatabaseConnector = Depends(get_db_dependency),
 ):
-    """Submit an AI request for processing"""
-
-    if not producer_mgr.db_connected:
-        raise HTTPException(status_code=503, detail="Database not connected")
-
+    """Submit an AI request for processing with async database operations"""
     try:
         # Create AI request event
         event_data = {
@@ -375,15 +365,11 @@ async def submit_ai_request(
         success = producer_mgr.send_event(event_dict)
 
         if success:
-            # Store in database and get request_id
-            request_id = producer_mgr.db_manager.insert_ai_request(event_dict)
-
-            # EVENTS_RECEIVED.labels(event_type="ai_request", status="success").inc()
+            # Store in database and get request_id using async operations
+            request_id = await db.insert_ai_request(event_dict)
 
             # Estimate wait time based on pending requests
-            pending_requests = producer_mgr.db_manager.get_pending_ai_requests(
-                limit=1000
-            )
+            pending_requests = await db.get_pending_ai_requests(limit=1000)
             estimated_wait = (
                 len(pending_requests) * 10
             )  # Rough estimate: 10 seconds per request
@@ -399,7 +385,6 @@ async def submit_ai_request(
 
     except Exception as e:
         logger.error(f"Error submitting AI request: {e}")
-        # EVENTS_RECEIVED.labels(event_type="ai_request", status="error").inc()
         raise HTTPException(
             status_code=500, detail=f"Failed to submit AI request: {str(e)}"
         )
@@ -407,15 +392,11 @@ async def submit_ai_request(
 
 @app.get("/ai/requests/{request_id}", response_model=AIStatusResponse, tags=["AI"])
 async def get_ai_request_status(
-    request_id: str, producer_mgr: ProducerManager = Depends(get_producer_manager)
+    request_id: str, db: AsyncDatabaseConnector = Depends(get_db_dependency)
 ):
-    """Get the status of an AI request"""
-
-    if not producer_mgr.db_connected:
-        raise HTTPException(status_code=503, detail="Database not connected")
-
+    """Get the status of an AI request using async database operations"""
     try:
-        request_data = producer_mgr.db_manager.get_ai_request_by_id(request_id)
+        request_data = await db.get_ai_request_by_id(request_id)
 
         if not request_data:
             raise HTTPException(status_code=404, detail="AI request not found")
@@ -448,18 +429,14 @@ async def get_ai_request_status(
 async def get_user_ai_requests(
     user_id: int,
     limit: int = 50,
-    producer_mgr: ProducerManager = Depends(get_producer_manager),
+    db: AsyncDatabaseConnector = Depends(get_db_dependency),
 ):
-    """Get AI requests for a specific user"""
-
-    if not producer_mgr.db_connected:
-        raise HTTPException(status_code=503, detail="Database not connected")
-
+    """Get AI requests for a specific user using async database operations"""
     if limit > 100:
         limit = 100  # Prevent excessive queries
 
     try:
-        requests_data = producer_mgr.db_manager.get_ai_requests_by_user(user_id, limit)
+        requests_data = await db.get_ai_requests_by_user(user_id, limit)
 
         requests = []
         pending_count = 0
@@ -505,7 +482,6 @@ async def get_status():
     return {
         "status": "healthy" if producer_manager.connected else "unhealthy",
         "kafka_connected": producer_manager.connected,
-        "database_connected": producer_manager.db_connected,
         "uptime_seconds": time.time() - startup_time,
         "topic": Config.KAFKA_TOPIC_NAME,
         "bootstrap_servers": Config.KAFKA_BOOTSTRAP_SERVERS,
