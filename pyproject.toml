@@ -19,6 +19,7 @@ classifiers = [
 ]
 
 dependencies = [
+    "aiokafka>=0.10.0",
     "kafka-python>=2.0.2",
     "psycopg2-binary>=2.9.7",
     "asyncpg>=0.29.0",
