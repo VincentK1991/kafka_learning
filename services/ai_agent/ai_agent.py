@@ -4,28 +4,22 @@ AI Agent Service - Processes pending AI requests using OpenAI
 """
 
 import logging
-import time
 import os
-from typing import Dict, Any
 import threading
+import time
+from typing import Any
 
-from fastapi import FastAPI
-from fastapi.middleware.cors import CORSMiddleware
-import uvicorn
-
-# from prometheus_client import (
-#     Counter,
-#     Histogram,
-#     Gauge,
-#     generate_latest,
-#     CONTENT_TYPE_LATEST,
-# )
-from fastapi import Response
 import openai
+import uvicorn
+from dotenv import load_dotenv
+from fastapi import FastAPI, Response
+from fastapi.middleware.cors import CORSMiddleware
 
 from shared.config import Config
 from shared.consumer import DatabaseManager
 from shared.models import HealthResponse
+
+load_dotenv()
 
 # Setup logging
 logging.basicConfig(
@@ -95,7 +89,7 @@ class AIAgent:
         # AI_AGENT_HEALTH.set(0)  # Metrics disabled
         logger.info("AI Agent disconnected")
 
-    def process_ai_request(self, request: Dict[str, Any]) -> None:
+    def process_ai_request(self, request: dict[str, Any]) -> None:
         """Process a single AI request"""
         request_id = request["request_id"]
         start_time = time.time()
@@ -112,7 +106,8 @@ class AIAgent:
             messages = [
                 {
                     "role": "system",
-                    "content": "You are a helpful AI assistant. Provide clear, accurate, and helpful responses.",
+                    "content": "You are a helpful AI assistant.\
+                         Provide clear, accurate, and helpful responses.",
                 }
             ]
 

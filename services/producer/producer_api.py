@@ -8,29 +8,30 @@ import logging
 import time
 import uuid
 from datetime import datetime
-from typing import List, Dict, Any
+from typing import Any
 
-from fastapi import FastAPI, HTTPException, Depends
+import uvicorn
+from dotenv import load_dotenv
+from fastapi import Depends, FastAPI, HTTPException, Response
 from fastapi.middleware.cors import CORSMiddleware
 from kafka import KafkaProducer
 from kafka.errors import KafkaError
-import uvicorn
-
-from fastapi import Response
 
 from shared.config import Config
 from shared.consumer import DatabaseManager
 from shared.models import (
-    EventResponse,
-    BatchEventResponse,
-    HealthResponse,
     AIRequestProperties,
     AIRequestResponse,
-    AIStatusResponse,
     AIRequestsListResponse,
-    validate_event,
+    AIStatusResponse,
+    BatchEventResponse,
+    EventResponse,
+    HealthResponse,
     event_to_dict,
+    validate_event,
 )
+
+load_dotenv()
 
 # Setup logging
 logging.basicConfig(
@@ -110,7 +111,7 @@ class ProducerManager:
             self.db_connected = False
             logger.info("Disconnected from database")
 
-    def send_event(self, event: Dict[str, Any]) -> bool:
+    def send_event(self, event: dict[str, Any]) -> bool:
         """Send event to Kafka"""
         if not self.connected:
             raise HTTPException(
@@ -195,7 +196,7 @@ async def metrics():
 
 @app.post("/events", response_model=EventResponse, tags=["Events"])
 async def ingest_event(
-    event_data: Dict[str, Any],
+    event_data: dict[str, Any],
     producer_mgr: ProducerManager = Depends(get_producer_manager),
 ):
     """Ingest a single event"""
@@ -238,7 +239,7 @@ async def ingest_event(
 
 @app.post("/events/batch", response_model=BatchEventResponse, tags=["Events"])
 async def ingest_batch_events(
-    events: List[Dict[str, Any]],
+    events: list[dict[str, Any]],
     producer_mgr: ProducerManager = Depends(get_producer_manager),
 ):
     """Ingest multiple events in batch"""
@@ -295,8 +296,9 @@ async def generate_sample_event(
 ):
     """Generate and ingest a sample event (for testing/development)"""
 
-    from faker import Faker
     import random
+
+    from faker import Faker
 
     fake = Faker()
 

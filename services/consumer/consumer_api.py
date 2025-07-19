@@ -6,33 +6,35 @@ FastAPI Consumer Server - Pipeline monitoring and management API
 import asyncio
 import json
 import logging
+import threading
 import time
 from datetime import datetime
-from typing import List, Dict, Any
-import threading
+from typing import Any
 
+import psycopg2
+import uvicorn
+from dotenv import load_dotenv
 from fastapi import (
     FastAPI,
+    HTTPException,
+    Response,
     WebSocket,
     WebSocketDisconnect,
-    HTTPException,
 )
 from fastapi.middleware.cors import CORSMiddleware
 from kafka import KafkaConsumer
-import uvicorn
-
-from fastapi import Response
-import psycopg2
 from psycopg2.extras import RealDictCursor
 
 from shared.config import Config
 from shared.consumer import DatabaseManager, DataTransformer
 from shared.models import (
-    PipelineStatus,
-    EventStats,
     AnalyticsSummary,
+    EventStats,
     HealthResponse,
+    PipelineStatus,
 )
+
+load_dotenv()
 
 # Setup logging
 logging.basicConfig(
@@ -53,7 +55,7 @@ app = FastAPI(
 startup_time = time.time()
 consumer_thread = None
 consumer_running = False
-websocket_connections: List[WebSocket] = []
+websocket_connections: list[WebSocket] = []
 
 
 # Middleware
@@ -117,7 +119,7 @@ class ConsumerManager:
         # CONSUMER_HEALTH.set(0)  # Metrics disabled
         logger.info("Disconnected from Kafka and database")
 
-    def process_event(self, event: Dict[str, Any]) -> bool:
+    def process_event(self, event: dict[str, Any]) -> bool:
         """Process a single event"""
         try:
             # Store raw event
@@ -128,13 +130,13 @@ class ConsumerManager:
                 # Store AI request in ai_requests table
                 request_id = self.db_manager.insert_ai_request(event)
                 logger.info(
-                    f"Processed AI request {request_id} for event {event.get('event_id')}"
+                    f"Processed AI request {request_id}\
+                         for event {event.get('event_id')}"
                 )
             else:
                 # Transform and store regular events
                 transformed_event = self.transformer.transform_event(event)
                 self.db_manager.insert_transformed_event(transformed_event)
-
 
             self.processed_count += 1
 
@@ -142,7 +144,8 @@ class ConsumerManager:
             asyncio.create_task(self.broadcast_event(event))
 
             logger.info(
-                f"Processed event {event.get('event_id')} of type {event.get('event_type')}"
+                f"Processed event {event.get('event_id')}\
+                     of type {event.get('event_type')}"
             )
             return True
 
@@ -151,7 +154,7 @@ class ConsumerManager:
             logger.error(f"Failed to process event {event.get('event_id')}: {e}")
             return False
 
-    async def broadcast_event(self, event: Dict[str, Any]):
+    async def broadcast_event(self, event: dict[str, Any]):
         """Broadcast event to WebSocket connections"""
         if websocket_connections:
             message = {
