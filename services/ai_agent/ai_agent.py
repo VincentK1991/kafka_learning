@@ -5,6 +5,7 @@ AI Agent Service - Processes pending AI requests using OpenAI
 
 import asyncio
 import contextlib
+import json
 import logging
 import os
 import time
@@ -15,6 +16,8 @@ import uvicorn
 from dotenv import load_dotenv
 from fastapi import Depends, FastAPI, Response
 from fastapi.middleware.cors import CORSMiddleware
+from kafka import KafkaConsumer
+from kafka.errors import KafkaError
 
 from shared.config import Config
 from shared.database import (
@@ -62,10 +65,12 @@ class AsyncAIAgent:
     """AI Agent for processing requests with async database operations"""
 
     def __init__(self):
-        self.openai_client = None
+        self.consumer = None
         self.running = False
         self.processed_count = 0
         self.error_count = 0
+        self.connected = False
+        self.openai_client = None
 
         # Initialize OpenAI client
         api_key = os.getenv("OPENAI_API_KEY")
@@ -75,11 +80,38 @@ class AsyncAIAgent:
         else:
             self.openai_client = openai.OpenAI(api_key=api_key)
 
+    def connect_kafka(self):
+        """Connect to Kafka"""
+        try:
+            self.consumer = KafkaConsumer(
+                Config.KAFKA_AI_REQUESTS_TOPIC,
+                bootstrap_servers=Config.KAFKA_BOOTSTRAP_SERVERS,
+                group_id="ai_agent_group",
+                value_deserializer=lambda x: json.loads(x.decode("utf-8")),
+                auto_offset_reset="earliest",
+                enable_auto_commit=True,
+                auto_commit_interval_ms=1000,
+                consumer_timeout_ms=1000,
+            )
+            self.connected = True
+            logger.info(f"Connected to Kafka topic: {Config.KAFKA_AI_REQUESTS_TOPIC}")
+        except KafkaError as e:
+            self.connected = False
+            logger.error(f"Failed to connect to Kafka: {e}")
+            raise
+
+    def disconnect_kafka(self):
+        """Disconnect from Kafka"""
+        if self.consumer:
+            self.consumer.close()
+            self.connected = False
+            logger.info("Disconnected from Kafka")
+
     async def process_ai_request(
-        self, request: dict[str, Any], db: AsyncDatabaseConnector
+        self, request_payload: dict[str, Any], db: AsyncDatabaseConnector
     ) -> None:
-        """Process a single AI request with async database operations"""
-        request_id = request["request_id"]
+        """Process a single AI request received from Kafka"""
+        request_id = request_payload["request_id"]
         start_time = time.time()
 
         try:
@@ -87,7 +119,8 @@ class AsyncAIAgent:
             await db.update_ai_request_status(request_id, "processing")
 
             logger.info(
-                f"Processing AI request {request_id}: {request['question'][:100]}..."
+                f"Processing AI request {request_id}:\
+                     {request_payload['question'][:100]}..."
             )
 
             if not self.openai_client:
@@ -102,23 +135,23 @@ class AsyncAIAgent:
                 }
             ]
 
-            if request.get("context"):
+            if request_payload.get("context"):
                 messages.append(
                     {
                         "role": "system",
-                        "content": f"Additional context: {request['context']}",
+                        "content": f"Additional context: {request_payload['context']}",
                     }
                 )
 
-            messages.append({"role": "user", "content": request["question"]})
+            messages.append({"role": "user", "content": request_payload["question"]})
 
             # Call OpenAI API
             try:
                 response = self.openai_client.chat.completions.create(
-                    model=request.get("model", "gpt-3.5-turbo"),
+                    model=request_payload.get("model", "gpt-3.5-turbo"),
                     messages=messages,
-                    max_tokens=request.get("max_tokens", 500),
-                    temperature=float(request.get("temperature", 0.7)),
+                    max_tokens=request_payload.get("max_tokens", 500),
+                    temperature=float(request_payload.get("temperature", 0.7)),
                 )
 
                 answer = response.choices[0].message.content
@@ -173,36 +206,44 @@ class AsyncAIAgent:
 
             logger.error(f"Error processing AI request {request_id}: {e}")
 
-    async def start_processing(self):
-        """Start processing pending AI requests with async operations"""
+    async def start_consuming(self):
+        """Start consuming and processing AI requests from Kafka."""
+        if not self.connected:
+            raise Exception("AI Agent not connected to Kafka")
+
         self.running = True
-        logger.info("AI Agent started processing...")
+        logger.info("AI Agent started consuming messages...")
 
-        while self.running:
-            try:
-                # Get database connection
-                db = await get_db()
+        try:
+            while self.running:
+                try:
+                    # Poll for messages with timeout
+                    messages = self.consumer.poll(timeout_ms=1000)
 
-                # Get pending requests
-                pending_requests = await db.get_pending_ai_requests(limit=5)
+                    if not messages:
+                        await asyncio.sleep(1)  # a brief pause
+                        continue
 
-                if pending_requests:
-                    logger.info(f"Found {len(pending_requests)} pending AI requests")
+                    db = await get_db()
+                    for topic_partition, records in messages.items():
+                        for record in records:
+                            if not self.running:
+                                break
 
-                    # Process requests sequentially to avoid overwhelming OpenAI API
-                    for request in pending_requests:
-                        if not self.running:
-                            break
-                        await self.process_ai_request(request, db)
-                else:
-                    # No pending requests, wait a bit
-                    await asyncio.sleep(5)
+                            logger.info(
+                                f"Received AI request: {record.value['request_id']}"
+                            )
+                            await self.process_ai_request(record.value, db)
 
-            except Exception as e:
-                logger.error(f"Error in processing loop: {e}")
-                await asyncio.sleep(10)  # Wait longer on error
+                except Exception as e:
+                    logger.error(f"Error during consumption: {e}")
+                    await asyncio.sleep(5)  # Wait longer on error
 
-        logger.info("AI Agent stopped processing")
+        except KeyboardInterrupt:
+            logger.info("AI Agent consumption interrupted.")
+        finally:
+            self.running = False
+            logger.info("AI Agent stopped consuming messages.")
 
     def stop_processing(self):
         """Stop processing AI requests"""
@@ -218,7 +259,7 @@ async def run_ai_agent():
     global processing_running
     processing_running = True
     try:
-        await ai_agent.start_processing()
+        await ai_agent.start_consuming()
     except Exception as e:
         logger.error(f"AI agent error: {e}")
     finally:
@@ -232,6 +273,8 @@ async def startup_event():
     logger.info("Starting AI Agent service...")
 
     try:
+        # Connect to Kafka
+        ai_agent.connect_kafka()
         # Start processing in background task
         processing_task = asyncio.create_task(run_ai_agent())
 
@@ -246,6 +289,7 @@ async def shutdown_event():
     logger.info("Shutting down AI Agent service...")
 
     ai_agent.stop_processing()
+    ai_agent.disconnect_kafka()
 
     # Cancel the processing task
     if processing_task:
@@ -275,6 +319,7 @@ async def health_check(db: AsyncDatabaseConnector = Depends(get_db_dependency)):
 
     checks = {
         "database_connected": db_healthy,
+        "kafka_connected": ai_agent.connected,
         "openai_configured": ai_agent.openai_client is not None,
         "processing_running": processing_running,
         "connection_pool": True,

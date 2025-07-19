@@ -11,11 +11,11 @@ from datetime import datetime
 from typing import Any
 
 import uvicorn
+from aiokafka import AIOKafkaProducer
+from aiokafka.errors import KafkaError
 from dotenv import load_dotenv
 from fastapi import Depends, FastAPI, HTTPException, Response
 from fastapi.middleware.cors import CORSMiddleware
-from kafka import KafkaProducer
-from kafka.errors import KafkaError
 
 from shared.config import Config
 from shared.database import (
@@ -53,7 +53,7 @@ app = FastAPI(
     redoc_url="/redoc",
 )
 
-producer: KafkaProducer = None
+producer: AIOKafkaProducer = None
 startup_time = time.time()
 
 
@@ -74,19 +74,19 @@ class AsyncProducerManager:
         self.producer = None
         self.connected = False
 
-    def connect(self):
+    async def connect(self):
         """Connect to Kafka (database connections managed by pool)"""
         try:
             # Connect to Kafka
-            self.producer = KafkaProducer(
+            self.producer = AIOKafkaProducer(
                 bootstrap_servers=Config.KAFKA_BOOTSTRAP_SERVERS,
                 value_serializer=lambda x: json.dumps(x).encode("utf-8"),
                 key_serializer=lambda x: x.encode("utf-8") if x else None,
                 acks="all",  # Wait for all replicas to acknowledge
-                retries=3,  # Retry on failure
-                max_in_flight_requests_per_connection=1,  # Ensure ordering
+                # max_in_flight_requests_per_connection=1, # Ensure ordering
                 compression_type="gzip",  # Compress messages
             )
+            await self.producer.start()
             self.connected = True
             logger.info("Connected to Kafka successfully")
 
@@ -95,32 +95,26 @@ class AsyncProducerManager:
             logger.error(f"Failed to connect to Kafka: {e}")
             raise
 
-    def disconnect(self):
+    async def disconnect(self):
         """Disconnect from Kafka"""
         if self.producer:
-            self.producer.close()
+            await self.producer.stop()
             self.connected = False
             logger.info("Disconnected from Kafka")
 
-    def send_event(self, event: dict[str, Any]) -> bool:
-        """Send event to Kafka"""
+    async def send_event(
+        self, topic: str, event: dict[str, Any], key: str = None
+    ) -> bool:
+        """Send event to a specific Kafka topic asynchronously"""
         if not self.connected:
             raise HTTPException(
                 status_code=503, detail="Producer not connected to Kafka"
             )
 
         try:
-            key = str(event.get("user_id", ""))
+            await self.producer.send_and_wait(topic, key=key, value=event)
 
-            future = self.producer.send(Config.KAFKA_TOPIC_NAME, key=key, value=event)
-
-            # Wait for the message to be sent (synchronous for demo purposes)
-            record_metadata = future.get(timeout=10)
-
-            logger.info(
-                f"Sent event {event['event_id']} to topic {record_metadata.topic} "
-                f"partition {record_metadata.partition} offset {record_metadata.offset}"
-            )
+            logger.info(f"Sent event {event.get('event_id')} to topic {topic}")
             return True
 
         except KafkaError as e:
@@ -141,14 +135,14 @@ producer_manager = AsyncProducerManager()
 async def startup_event():
     """Initialize the application"""
     logger.info("Starting Producer API server...")
-    producer_manager.connect()
+    await producer_manager.connect()
 
 
 @app.on_event("shutdown")
 async def shutdown_event():
     """Cleanup on shutdown"""
     logger.info("Shutting down Producer API server...")
-    producer_manager.disconnect()
+    await producer_manager.disconnect()
     await close_connection_pool()
 
 
@@ -214,7 +208,9 @@ async def ingest_event(
         event_dict = event_to_dict(validated_event)
 
         # Send to Kafka
-        success = producer_mgr.send_event(event_dict)
+        success = await producer_mgr.send_event(
+            Config.KAFKA_TOPIC_NAME, event_dict, key=str(validated_event.user_id)
+        )
 
         if success:
             return EventResponse(
@@ -262,7 +258,9 @@ async def ingest_batch_events(
             event_dict = event_to_dict(validated_event)
 
             # Send to Kafka
-            producer_mgr.send_event(event_dict)
+            await producer_mgr.send_event(
+                Config.KAFKA_TOPIC_NAME, event_dict, key=str(validated_event.user_id)
+            )
             processed_count += 1
 
         except Exception as e:
@@ -361,27 +359,56 @@ async def submit_ai_request(
         validated_event = validate_event(event_data)
         event_dict = event_to_dict(validated_event)
 
-        # Send to Kafka first
-        success = producer_mgr.send_event(event_dict)
+        # Store in database first to get a request_id
+        request_id = await db.insert_ai_request(event_dict)
 
-        if success:
-            # Store in database and get request_id using async operations
-            request_id = await db.insert_ai_request(event_dict)
+        # Prepare message for AI topic
+        ai_task_payload = {
+            "request_id": request_id,
+            "user_id": user_id,
+            "question": ai_request.question,
+            "context": ai_request.context,
+            "model": ai_request.model,
+            "max_tokens": ai_request.max_tokens,
+            "temperature": ai_request.temperature,
+        }
 
-            # Estimate wait time based on pending requests
-            pending_requests = await db.get_pending_ai_requests(limit=1000)
-            estimated_wait = (
-                len(pending_requests) * 10
-            )  # Rough estimate: 10 seconds per request
-
-            return AIRequestResponse(
-                success=True,
-                request_id=request_id,
-                message="AI request submitted successfully",
-                estimated_wait_time_seconds=estimated_wait,
+        # Send to dedicated AI Kafka topic
+        try:
+            await producer_mgr.send_event(
+                Config.KAFKA_AI_REQUESTS_TOPIC, ai_task_payload, key=str(user_id)
             )
-        else:
-            raise HTTPException(status_code=500, detail="Failed to submit AI request")
+            logger.info(
+                f"Sent AI request {request_id}\
+                     to topic {Config.KAFKA_AI_REQUESTS_TOPIC}"
+            )
+        except KafkaError as e:
+            logger.error(f"Kafka error sending AI request {request_id}: {e}")
+            # Potentially roll back the DB insert or mark as failed immediately
+            await db.update_ai_request_status(
+                request_id, "failed", error_message=f"Kafka queuing failed: {e}"
+            )
+            raise HTTPException(
+                status_code=503, detail=f"Failed to queue AI request: {str(e)}"
+            )
+
+        # Send original event to main topic for logging/analytics
+        await producer_mgr.send_event(
+            Config.KAFKA_TOPIC_NAME, event_dict, key=str(user_id)
+        )
+
+        # Estimate wait time based on pending requests
+        pending_requests = await db.get_pending_ai_requests(limit=1000)
+        estimated_wait = (
+            len(pending_requests) * 10
+        )  # Rough estimate: 10 seconds per request
+
+        return AIRequestResponse(
+            success=True,
+            request_id=request_id,
+            message="AI request submitted successfully",
+            estimated_wait_time_seconds=estimated_wait,
+        )
 
     except Exception as e:
         logger.error(f"Error submitting AI request: {e}")
