@@ -1,0 +1,56 @@
+groups:
+  - name: kafka-pipeline-alerts
+    rules:
+      - alert: ProducerDown
+        expr: producer_health == 0
+        for: 30s
+        labels:
+          severity: critical
+        annotations:
+          summary: "Kafka Producer is down"
+          description: "The Kafka producer service has been down for more than 30 seconds"
+
+      - alert: ConsumerDown
+        expr: consumer_health == 0
+        for: 30s
+        labels:
+          severity: critical
+        annotations:
+          summary: "Kafka Consumer is down"
+          description: "The Kafka consumer service has been down for more than 30 seconds"
+
+      - alert: HighEventProcessingTime
+        expr: histogram_quantile(0.95, rate(events_processing_seconds_bucket[5m])) > 1
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High event processing time"
+          description: "95th percentile processing time is above 1 second for more than 2 minutes"
+
+      - alert: LowEventThroughput
+        expr: rate(events_received_total[5m]) < 0.1
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Low event throughput"
+          description: "Event ingestion rate has been below 0.1 events/second for more than 5 minutes"
+
+      - alert: DatabaseOperationErrors
+        expr: increase(database_operations_total{status="error"}[5m]) > 10
+        for: 1m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High database error rate"
+          description: "More than 10 database errors in the last 5 minutes"
+
+      - alert: ConsumerLagHigh
+        expr: consumer_lag > 1000
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Consumer lag is high"
+          description: "Consumer is lagging behind by more than 1000 messages" 

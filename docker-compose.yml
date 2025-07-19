@@ -1,0 +1,236 @@
+services:
+  # PostgreSQL Database
+  postgres:
+    image: postgres:15-alpine
+    container_name: kafka-postgres
+    environment:
+      POSTGRES_DB: kafka_pipeline
+      POSTGRES_USER: kafka_user
+      POSTGRES_PASSWORD: kafka_password
+      POSTGRES_INITDB_ARGS: "--encoding=UTF-8"
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./scripts/init-db.sql:/docker-entrypoint-initdb.d/init-db.sql:ro
+    networks:
+      - kafka-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U kafka_user -d kafka_pipeline"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.4.0
+    hostname: zookeeper
+    container_name: zookeeper
+    ports:
+      - "2181:2181"
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+    networks:
+      - kafka-network
+
+  kafka:
+    image: confluentinc/cp-kafka:7.4.0
+    hostname: kafka
+    container_name: kafka
+    depends_on:
+      - zookeeper
+    ports:
+      - "9092:9092"
+      - "9101:9101"
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: 'zookeeper:2181'
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:29092,PLAINTEXT_HOST://localhost:9092
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_JMX_PORT: 9101
+      KAFKA_JMX_HOSTNAME: localhost
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: 'true'
+    networks:
+      - kafka-network
+
+  # Optional Kafka UI for easier monitoring (good for learning)
+  kafka-ui:
+    image: provectuslabs/kafka-ui:latest
+    container_name: kafka-ui
+    depends_on:
+      - kafka
+    ports:
+      - "8080:8080"
+    environment:
+      KAFKA_CLUSTERS_0_NAME: local
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:29092
+    networks:
+      - kafka-network
+
+  # Producer FastAPI Server
+  producer-api:
+    build:
+      context: .
+      dockerfile: services/producer/Dockerfile
+    container_name: producer-api
+    depends_on:
+      - kafka
+      - postgres
+    ports:
+      - "8001:8001"
+    environment:
+      - KAFKA_BOOTSTRAP_SERVERS=kafka:29092
+      - KAFKA_TOPIC_NAME=user_events
+      - POSTGRES_HOST=postgres  # Use containerized PostgreSQL
+      - POSTGRES_PORT=5432
+      - POSTGRES_DB=kafka_pipeline
+      - POSTGRES_USER=kafka_user
+      - POSTGRES_PASSWORD=kafka_password
+    networks:
+      - kafka-network
+    restart: unless-stopped
+
+  # Consumer FastAPI Server
+  consumer-api:
+    build:
+      context: .
+      dockerfile: services/consumer/Dockerfile
+    container_name: consumer-api
+    depends_on:
+      - kafka
+      - postgres
+    ports:
+      - "8002:8002"
+    environment:
+      - KAFKA_BOOTSTRAP_SERVERS=kafka:29092
+      - KAFKA_TOPIC_NAME=user_events
+      - KAFKA_CONSUMER_GROUP_ID=data_transformer_group
+      - POSTGRES_HOST=postgres  # Use containerized PostgreSQL
+      - POSTGRES_PORT=5432
+      - POSTGRES_DB=kafka_pipeline
+      - POSTGRES_USER=kafka_user
+      - POSTGRES_PASSWORD=kafka_password
+    networks:
+      - kafka-network
+    restart: unless-stopped
+
+  # AI Agent Service - Processes AI requests using OpenAI
+  ai-agent:
+    build:
+      context: .
+      dockerfile: services/ai_agent/Dockerfile
+    container_name: ai-agent
+    depends_on:
+      - kafka
+      - postgres
+      - consumer-api
+    ports:
+      - "8003:8003"
+    environment:
+      - POSTGRES_HOST=postgres  # Use containerized PostgreSQL
+      - POSTGRES_PORT=5432
+      - POSTGRES_DB=kafka_pipeline
+      - POSTGRES_USER=kafka_user
+      - POSTGRES_PASSWORD=kafka_password
+      - OPENAI_API_KEY=${OPENAI_API_KEY}  # Set this in your .env file
+      - LOG_LEVEL=INFO
+    networks:
+      - kafka-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8003/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+  # Nginx Load Balancer (optional)
+  nginx:
+    image: nginx:alpine
+    container_name: nginx-lb
+    depends_on:
+      - producer-api
+      - consumer-api
+    ports:
+      - "80:80"
+    volumes:
+      - ./services/nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+    networks:
+      - kafka-network
+    restart: unless-stopped
+
+  # Prometheus - Metrics Collection
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.console.libraries=/etc/prometheus/console_libraries'
+      - '--web.console.templates=/etc/prometheus/consoles'
+      - '--storage.tsdb.retention.time=200h'
+      - '--web.enable-lifecycle'
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./services/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./services/prometheus/prometheus-rules.yml:/etc/prometheus/prometheus-rules.yml:ro
+      - prometheus-data:/prometheus
+    networks:
+      - kafka-network
+    restart: unless-stopped
+
+  # Grafana - Metrics Visualization
+  grafana:
+    image: grafana/grafana:latest
+    container_name: grafana
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_USERS_ALLOW_SIGN_UP=false
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./grafana/datasources:/etc/grafana/provisioning/datasources:ro
+      - ./grafana/dashboards:/etc/grafana/provisioning/dashboards:ro
+    networks:
+      - kafka-network
+    depends_on:
+      - prometheus
+    restart: unless-stopped
+
+  # Node Exporter - System Metrics
+  node-exporter:
+    image: prom/node-exporter:latest
+    container_name: node-exporter
+    command:
+      - '--path.procfs=/host/proc'
+      - '--path.rootfs=/rootfs'
+      - '--path.sysfs=/host/sys'
+      - '--collector.filesystem.mount-points-exclude=^/(sys|proc|dev|host|etc)($$|/)'
+    ports:
+      - "9100:9100"
+    volumes:
+      - /proc:/host/proc:ro
+      - /sys:/host/sys:ro
+      - /:/rootfs:ro
+    networks:
+      - kafka-network
+    restart: unless-stopped
+
+networks:
+  kafka-network:
+    driver: bridge
+
+volumes:
+  kafka-data:
+  zookeeper-data:
+  postgres-data:
+  prometheus-data:
+  grafana-data: 
