@@ -494,7 +494,7 @@ def start_server():
         "services.producer.producer_api:app",
         host="0.0.0.0",
         port=8001,
-        reload=False,  # Disable reload to prevent Prometheus metric duplication
+        reload=True,
         log_level="info",
     )
 

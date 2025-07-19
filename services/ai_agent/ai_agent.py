@@ -340,7 +340,7 @@ def start_server():
         "services.ai_agent.ai_agent:app",
         host="0.0.0.0",
         port=8003,
-        reload=False,  # Disable reload to prevent Prometheus metric duplication
+        reload=True,
         log_level="info",
     )
 
