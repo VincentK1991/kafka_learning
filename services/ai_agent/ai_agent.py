@@ -6,11 +6,10 @@ AI Agent Service - Processes pending AI requests using OpenAI
 import logging
 import time
 import os
-from datetime import datetime
-from typing import Dict, Any, Optional
+from typing import Dict, Any
 import threading
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
 
@@ -34,32 +33,6 @@ logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
 )
 logger = logging.getLogger(__name__)
-
-# Prometheus metrics - temporarily commented out to avoid duplication issues
-# TODO: Re-enable metrics once duplication issue is resolved
-# from prometheus_client import REGISTRY
-#
-# # Clear existing metrics to prevent duplication on reload
-# for collector in list(REGISTRY._collector_to_names.keys()):
-#     if hasattr(collector, "_name") and any(
-#         name.startswith("ai_agent_")
-#         for name in REGISTRY._collector_to_names.get(collector, [])
-#     ):
-#         REGISTRY.unregister(collector)
-#
-# AI_REQUESTS_PROCESSED = Counter(
-#     "ai_agent_requests_processed_total", "Total AI requests processed", ["status"]
-# )
-# AI_PROCESSING_TIME = Histogram(
-#     "ai_agent_processing_seconds", "Time spent processing AI requests"
-# )
-# OPENAI_API_CALLS = Counter(
-#     "ai_agent_openai_api_calls_total", "Total OpenAI API calls", ["status"]
-# )
-# PENDING_REQUESTS = Gauge("ai_agent_pending_requests", "Number of pending AI requests")
-# AI_AGENT_HEALTH = Gauge(
-#     "ai_agent_health", "AI agent health status (1=healthy, 0=unhealthy)"
-# )
 
 # Global variables
 app = FastAPI(
@@ -205,7 +178,8 @@ class AIAgent:
                     error_message=error_msg,
                     processing_time=processing_time,
                 )
-            except:
+            except Exception as e:
+                logger.error(f"Failed to update AI request status in database: {e}")
                 pass  # Don't fail if we can't update the database
 
             self.error_count += 1
@@ -327,8 +301,8 @@ async def get_status():
     try:
         pending_requests = ai_agent.db_manager.get_pending_ai_requests(limit=1000)
         pending_count = len(pending_requests)
-    except:
-        pass
+    except Exception as e:
+        logger.error(f"Failed to get pending AI requests count: {e}")
 
     return {
         "status": "healthy" if processing_running else "stopped",

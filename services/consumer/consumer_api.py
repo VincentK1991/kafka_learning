@@ -7,8 +7,8 @@ import asyncio
 import json
 import logging
 import time
-from datetime import datetime, timedelta
-from typing import List, Dict, Any, Optional
+from datetime import datetime
+from typing import List, Dict, Any
 import threading
 
 from fastapi import (
@@ -16,21 +16,11 @@ from fastapi import (
     WebSocket,
     WebSocketDisconnect,
     HTTPException,
-    BackgroundTasks,
 )
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
 from kafka import KafkaConsumer
-from kafka.errors import KafkaError
 import uvicorn
 
-# from prometheus_client import (
-#     Counter,
-#     Histogram,
-#     Gauge,
-#     generate_latest,
-#     CONTENT_TYPE_LATEST,
-# )
 from fastapi import Response
 import psycopg2
 from psycopg2.extras import RealDictCursor
@@ -42,8 +32,6 @@ from shared.models import (
     EventStats,
     AnalyticsSummary,
     HealthResponse,
-    validate_event,
-    event_to_dict,
 )
 
 # Setup logging
@@ -52,32 +40,6 @@ logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
 )
 logger = logging.getLogger(__name__)
-
-# Prometheus metrics - temporarily commented out to avoid duplication issues
-# TODO: Re-enable metrics once duplication issue is resolved
-# from prometheus_client import REGISTRY
-#
-# # Clear existing metrics to prevent duplication on reload
-# for collector in list(REGISTRY._collector_to_names.keys()):
-#     if hasattr(collector, "_name") and any(
-#         name.startswith("consumer_")
-#         for name in REGISTRY._collector_to_names.get(collector, [])
-#     ):
-#         REGISTRY.unregister(collector)
-#
-# EVENTS_CONSUMED = Counter(
-#     "consumer_events_consumed_total", "Total events consumed", ["event_type", "status"]
-# )
-# EVENTS_PROCESSING_TIME = Histogram(
-#     "consumer_processing_seconds", "Time spent processing events"
-# )
-# DATABASE_OPERATIONS = Counter(
-#     "consumer_database_operations_total", "Database operations", ["operation", "status"]
-# )
-# CONSUMER_LAG = Gauge("consumer_lag", "Consumer lag (messages behind)")
-# CONSUMER_HEALTH = Gauge(
-#     "consumer_health", "Consumer health status (1=healthy, 0=unhealthy)"
-# )
 
 # Global variables
 app = FastAPI(
@@ -158,20 +120,13 @@ class ConsumerManager:
     def process_event(self, event: Dict[str, Any]) -> bool:
         """Process a single event"""
         try:
-            # with EVENTS_PROCESSING_TIME.time():  # Metrics disabled
             # Store raw event
             self.db_manager.insert_event(event)
-            # DATABASE_OPERATIONS.labels(
-            #     operation="insert_raw", status="success"
-            # ).inc()
 
             # Handle AI requests differently
             if event.get("event_type") == "ai_request":
                 # Store AI request in ai_requests table
                 request_id = self.db_manager.insert_ai_request(event)
-                # DATABASE_OPERATIONS.labels(
-                #     operation="insert_ai_request", status="success"
-                # ).inc()
                 logger.info(
                     f"Processed AI request {request_id} for event {event.get('event_id')}"
                 )
@@ -179,14 +134,9 @@ class ConsumerManager:
                 # Transform and store regular events
                 transformed_event = self.transformer.transform_event(event)
                 self.db_manager.insert_transformed_event(transformed_event)
-                # DATABASE_OPERATIONS.labels(
-                #     operation="insert_transformed", status="success"
-                # ).inc()
+
 
             self.processed_count += 1
-            # EVENTS_CONSUMED.labels(
-            #     event_type=event.get("event_type", "unknown"), status="success"
-            # ).inc()
 
             # Broadcast to WebSocket connections
             asyncio.create_task(self.broadcast_event(event))
@@ -198,10 +148,6 @@ class ConsumerManager:
 
         except Exception as e:
             self.error_count += 1
-            # DATABASE_OPERATIONS.labels(operation="insert", status="error").inc()
-            # EVENTS_CONSUMED.labels(
-            #     event_type=event.get("event_type", "unknown"), status="error"
-            # ).inc()
             logger.error(f"Failed to process event {event.get('event_id')}: {e}")
             return False
 
@@ -219,7 +165,8 @@ class ConsumerManager:
             for websocket in websocket_connections:
                 try:
                     await websocket.send_json(message)
-                except:
+                except Exception as e:
+                    logger.error(f"Failed to send event to WebSocket: {e}")
                     disconnected.append(websocket)
 
             # Remove disconnected clients

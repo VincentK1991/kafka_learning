@@ -7,41 +7,29 @@ import json
 import logging
 import time
 import uuid
-from datetime import datetime, timedelta
+from datetime import datetime
 from typing import List, Dict, Any
-import asyncio
 
-from fastapi import FastAPI, HTTPException, BackgroundTasks, Depends, status
+from fastapi import FastAPI, HTTPException, Depends
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
 from kafka import KafkaProducer
 from kafka.errors import KafkaError
 import uvicorn
 
-# from prometheus_client import (
-#     Counter,
-#     Histogram,
-#     Gauge,
-#     generate_latest,
-#     CONTENT_TYPE_LATEST,
-# )
 from fastapi import Response
 
 from shared.config import Config
 from shared.consumer import DatabaseManager
 from shared.models import (
-    BaseEvent,
     EventResponse,
     BatchEventResponse,
     HealthResponse,
-    AIRequestEvent,
     AIRequestProperties,
     AIRequestResponse,
     AIStatusResponse,
     AIRequestsListResponse,
     validate_event,
     event_to_dict,
-    EventWithProperties,
 )
 
 # Setup logging
@@ -50,45 +38,6 @@ logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
 )
 logger = logging.getLogger(__name__)
-
-# Prometheus metrics - temporarily commented out to avoid duplication issues
-# TODO: Re-enable metrics once duplication issue is resolved
-# try:
-#     EVENTS_RECEIVED = Counter(
-#         "producer_events_received_total",
-#         "Total events received",
-#         ["event_type", "status"],
-#     )
-# except ValueError:
-#     pass
-#
-# try:
-#     EVENTS_PROCESSING_TIME = Histogram(
-#         "producer_events_processing_seconds", "Time spent processing events"
-#     )
-# except ValueError:
-#     pass
-#
-# try:
-#     KAFKA_SEND_TIME = Histogram(
-#         "producer_kafka_send_seconds", "Time spent sending to Kafka"
-#     )
-# except ValueError:
-#     pass
-#
-# try:
-#     ACTIVE_CONNECTIONS = Gauge(
-#         "producer_active_connections", "Number of active connections"
-#     )
-# except ValueError:
-#     pass
-#
-# try:
-#     PRODUCER_HEALTH = Gauge(
-#         "producer_health", "Producer health status (1=healthy, 0=unhealthy)"
-#     )
-# except ValueError:
-#     pass
 
 # Global variables
 app = FastAPI(
@@ -143,11 +92,9 @@ class ProducerManager:
             self.db_connected = True
             logger.info("Connected to database successfully")
 
-            # PRODUCER_HEALTH.set(1)  # Commented out - metrics disabled
         except Exception as e:
             self.connected = False
             self.db_connected = False
-            # PRODUCER_HEALTH.set(0)  # Commented out - metrics disabled
             logger.error(f"Failed to connect: {e}")
             raise
 
@@ -163,8 +110,6 @@ class ProducerManager:
             self.db_connected = False
             logger.info("Disconnected from database")
 
-        # PRODUCER_HEALTH.set(0)  # Commented out - metrics disabled
-
     def send_event(self, event: Dict[str, Any]) -> bool:
         """Send event to Kafka"""
         if not self.connected:
@@ -173,8 +118,6 @@ class ProducerManager:
             )
 
         try:
-            # with KAFKA_SEND_TIME.time():  # Commented out - metrics disabled
-            # Use user_id as partition key for consistent partitioning
             key = str(event.get("user_id", ""))
 
             future = self.producer.send(Config.KAFKA_TOPIC_NAME, key=key, value=event)
@@ -190,17 +133,11 @@ class ProducerManager:
 
         except KafkaError as e:
             logger.error(f"Kafka error sending event {event.get('event_id')}: {e}")
-            # EVENTS_RECEIVED.labels(
-            #     event_type=event.get("event_type", "unknown"), status="failed"
-            # ).inc()
             raise HTTPException(
                 status_code=503, detail=f"Failed to send event: {str(e)}"
             )
         except Exception as e:
             logger.error(f"Unexpected error sending event {event.get('event_id')}: {e}")
-            # EVENTS_RECEIVED.labels(
-            #     event_type=event.get("event_type", "unknown"), status="failed"
-            # ).inc()
             raise HTTPException(status_code=500, detail=f"Internal error: {str(e)}")
 
 
@@ -281,10 +218,6 @@ async def ingest_event(
         success = producer_mgr.send_event(event_dict)
 
         if success:
-            # EVENTS_RECEIVED.labels(
-            #     event_type=validated_event.event_type, status="success"
-            # ).inc()
-
             return EventResponse(
                 success=True,
                 event_id=validated_event.event_id,
@@ -338,14 +271,9 @@ async def ingest_batch_events(
             producer_mgr.send_event(event_dict)
             processed_count += 1
 
-            # EVENTS_RECEIVED.labels(
-            #     event_type=validated_event.event_type, status="success"
-            # ).inc()
-
         except Exception as e:
             failed_count += 1
             failed_events.append(f"Event {i}: {str(e)}")
-            # EVENTS_RECEIVED.labels(event_type="unknown", status="failed").inc()
             logger.error(f"Failed to process event {i}: {e}")
 
     return BatchEventResponse(
