@@ -361,27 +361,57 @@ async def submit_ai_request(
         validated_event = validate_event(event_data)
         event_dict = event_to_dict(validated_event)
 
-        # Send to Kafka first
-        success = producer_mgr.send_event(event_dict)
+        # Store in database first to get a request_id
+        request_id = await db.insert_ai_request(event_dict)
 
-        if success:
-            # Store in database and get request_id using async operations
-            request_id = await db.insert_ai_request(event_dict)
+        # Prepare message for AI topic
+        ai_task_payload = {
+            "request_id": request_id,
+            "user_id": user_id,
+            "question": ai_request.question,
+            "context": ai_request.context,
+            "model": ai_request.model,
+            "max_tokens": ai_request.max_tokens,
+            "temperature": ai_request.temperature,
+        }
 
-            # Estimate wait time based on pending requests
-            pending_requests = await db.get_pending_ai_requests(limit=1000)
-            estimated_wait = (
-                len(pending_requests) * 10
-            )  # Rough estimate: 10 seconds per request
-
-            return AIRequestResponse(
-                success=True,
-                request_id=request_id,
-                message="AI request submitted successfully",
-                estimated_wait_time_seconds=estimated_wait,
+        # Send to dedicated AI Kafka topic
+        try:
+            future = producer_mgr.producer.send(
+                Config.KAFKA_AI_REQUESTS_TOPIC,
+                key=str(user_id),
+                value=ai_task_payload,
             )
-        else:
-            raise HTTPException(status_code=500, detail="Failed to submit AI request")
+            future.get(timeout=10)  # Wait for send confirmation
+            logger.info(
+                f"Sent AI request {request_id}\
+                     to topic {Config.KAFKA_AI_REQUESTS_TOPIC}"
+            )
+        except KafkaError as e:
+            logger.error(f"Kafka error sending AI request {request_id}: {e}")
+            # Potentially roll back the DB insert or mark as failed immediately
+            await db.update_ai_request_status(
+                request_id, "failed", error_message=f"Kafka queuing failed: {e}"
+            )
+            raise HTTPException(
+                status_code=503, detail=f"Failed to queue AI request: {str(e)}"
+            )
+
+        # Send original event to main topic for logging/analytics
+        producer_mgr.send_event(event_dict)
+
+        # Estimate wait time based on pending requests
+        pending_requests = await db.get_pending_ai_requests(limit=1000)
+        estimated_wait = (
+            len(pending_requests) * 10
+        )  # Rough estimate: 10 seconds per request
+
+        return AIRequestResponse(
+            success=True,
+            request_id=request_id,
+            message="AI request submitted successfully",
+            estimated_wait_time_seconds=estimated_wait,
+        )
 
     except Exception as e:
         logger.error(f"Error submitting AI request: {e}")

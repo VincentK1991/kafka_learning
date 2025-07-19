@@ -121,18 +121,9 @@ class AsyncConsumerManager:
             # Store raw event
             await db.insert_event(event)
 
-            # Handle AI requests differently
-            if event.get("event_type") == "ai_request":
-                # Store AI request in ai_requests table
-                request_id = await db.insert_ai_request(event)
-                logger.info(
-                    f"Processed AI request {request_id}\
-                         for event {event.get('event_id')}"
-                )
-            else:
-                # Transform and store regular events
-                transformed_event = self.transformer.transform_event(event)
-                await db.insert_transformed_event(transformed_event)
+            # Transform and store all events, including ai_request for logging
+            transformed_event = self.transformer.transform_event(event)
+            await db.insert_transformed_event(transformed_event)
 
             self.processed_count += 1
 
