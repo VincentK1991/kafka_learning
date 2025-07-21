@@ -13,12 +13,24 @@ class Config:
         "KAFKA_CONSUMER_GROUP_ID", "data_transformer_group"
     )
 
+    # Indexing Pipeline Topics
+    KAFKA_TEXT_INGESTION_TOPIC = os.getenv(
+        "KAFKA_TEXT_INGESTION_TOPIC", "text_ingestion"
+    )
+    KAFKA_EXTRACTION_TOPIC = os.getenv("KAFKA_EXTRACTION_TOPIC", "extraction")
+    KAFKA_NORMALIZATION_TOPIC = os.getenv("KAFKA_NORMALIZATION_TOPIC", "normalization")
+
     # PostgreSQL Configuration
     POSTGRES_HOST = os.getenv("POSTGRES_HOST", "localhost")
     POSTGRES_PORT = int(os.getenv("POSTGRES_PORT", "5432"))
     POSTGRES_DB = os.getenv("POSTGRES_DB", "kafka_pipeline")
     POSTGRES_USER = os.getenv("POSTGRES_USER", "kafka_user")
     POSTGRES_PASSWORD = os.getenv("POSTGRES_PASSWORD", "kafka_password")
+
+    # Neo4j Configuration
+    NEO4J_URI = os.getenv("NEO4J_URI", "bolt://localhost:7687")
+    NEO4J_USERNAME = os.getenv("NEO4J_USERNAME", "neo4j")
+    NEO4J_PASSWORD = "password"
 
     # Application Configuration
     BATCH_SIZE = int(os.getenv("BATCH_SIZE", "100"))
@@ -33,6 +45,15 @@ class Config:
             "database": cls.POSTGRES_DB,
             "user": cls.POSTGRES_USER,
             "password": cls.POSTGRES_PASSWORD,
+        }
+
+    @classmethod
+    def get_neo4j_config(cls) -> dict[str, Any]:
+        """Return Neo4j connection configuration"""
+        return {
+            "uri": cls.NEO4J_URI,
+            "user": cls.NEO4J_USERNAME,
+            "password": cls.NEO4J_PASSWORD,
         }
 
     @classmethod
