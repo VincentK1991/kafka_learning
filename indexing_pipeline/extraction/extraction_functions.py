@@ -6,15 +6,15 @@ from pydantic import BaseModel
 
 from indexing_pipeline.extraction.chunking import chunk_text
 from indexing_pipeline.extraction.embedding.embedding import embed_text
-from indexing_pipeline.extraction.ontology.finance.relationships import FinancialGraph
-from indexing_pipeline.extraction.ontology.meta_graph import Reference, ReferenceChunk
-from indexing_pipeline.extraction.types import (
+from indexing_pipeline.extraction.extraction_models import (
     ChunkWithEmbedding,
     ExtractedDataWithEmbedding,
     TextContent,
     TextContentWithChunks,
     TextContentWithChunksAndEmbedding,
 )
+from indexing_pipeline.extraction.ontology.finance.relationships import FinancialGraph
+from indexing_pipeline.extraction.ontology.meta_graph import Reference, ReferenceChunk
 from shared.neo4j import get_neo4j_connector
 
 
@@ -90,7 +90,7 @@ async def embed_chunks(
 
 async def extract_entity_relationship(
     text_content_with_chunks: TextContentWithChunksAndEmbedding,
-) -> tuple[TextContentWithChunksAndEmbedding, list[FinancialGraph]]:
+) -> ExtractedDataWithEmbedding:
     """Transform the data to a pandas dataframe."""
     tasks = []
     for chunk_with_embedding in text_content_with_chunks.chunks_with_embedding:
@@ -164,11 +164,11 @@ async def extract_embed_index_data(title: str, content: str) -> dict[str, Any]:
     """
     text_content = create_text_content(title, content)
     text_content_with_chunks = chunk_data(text_content)
-    text_content_with_chunks_and_embedding = embed_chunks(text_content_with_chunks)
-    text_content_with_chunks_and_embedding, graph_models = extract_entity_relationship(
+    text_content_with_chunks_and_embedding = await embed_chunks(
+        text_content_with_chunks
+    )
+    extracted_data_with_embedding = await extract_entity_relationship(
         text_content_with_chunks_and_embedding
     )
-    cypher_queries = convert_object_to_cypher(
-        text_content_with_chunks_and_embedding, graph_models
-    )
+    cypher_queries = await convert_object_to_cypher(extracted_data_with_embedding)
     return await index_to_database(cypher_queries)

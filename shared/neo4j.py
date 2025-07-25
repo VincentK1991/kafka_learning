@@ -4,17 +4,18 @@ from typing import Any
 
 from neo4j import AsyncDriver, AsyncGraphDatabase, AsyncSession, AsyncTransaction
 
-from shared.config import Config
+from shared.config import get_config
 
 
+config = get_config()
 class Neo4jConnector:
     _driver: AsyncDriver | None = None
 
     def __init__(
         self,
-        uri: str = Config.NEO4J_URI,
-        user: str = Config.NEO4J_USERNAME,
-        password: str = Config.NEO4J_PASSWORD,
+        uri: str = config.NEO4J_URI,
+        user: str = config.NEO4J_USERNAME,
+        password: str = config.NEO4J_PASSWORD,
     ) -> None:
         self.uri = uri
         self.user = user
@@ -60,7 +61,7 @@ class Neo4jConnector:
 @asynccontextmanager
 async def get_neo4j_connector() -> Neo4jConnector:
     connector = Neo4jConnector(
-        Config.NEO4J_URI, Config.NEO4J_USERNAME, Config.NEO4J_PASSWORD
+        config.NEO4J_URI, config.NEO4J_USERNAME, config.NEO4J_PASSWORD
     )
     try:
         await connector.connect()

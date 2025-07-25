@@ -26,4 +26,4 @@ class ExtractedDataWithEmbedding(BaseModel):
     name: str
     content: str
     chunks_with_embedding: list[ChunkWithEmbedding]
-    extracted_graphs: list[type[BaseModel]]
+    extracted_graphs: list[BaseModel]

@@ -1,3 +1,8 @@
+CHECK_ENTITY_EXISTS_QUERY = """
+MATCH (n {id: $source_entity_id})
+RETURN COUNT(n) > 0 AS node_exists
+"""
+
 ENTITY_NORMALIZATION_QUERY = """
 MATCH (e1:Entity)
 WHERE e1.embedding IS NOT NULL AND e1.id = $source_entity_id
@@ -66,8 +71,7 @@ CALL apoc.refactor.mergeNodes(all_nodes, {
         name: 'discard',     // Keep original node's name
         id: 'discard',       // Keep original node's id
         embedding: 'discard', // Keep original embedding
-        tags: 'combine',       // Combine arrays/values
-        '.*': 'discard'        // Default: discard other properties
+        tags: 'combine'       // Combine arrays/values
     },
     mergeRels: false  // Handle relationships separately if needed
 })
@@ -90,7 +94,7 @@ RETURN
 RELATIONSHIP_NORMALIZATION_QUERY = """
 // Relationship Normalization for Entity E
 MATCH (e:Entity)
-WHERE e.id = 'c8e7633f-d75f-48eb-b55b-269af89f38fc'
+WHERE e.id = $source_entity_id
 
 // =============================================================================
 // 1. MERGE RELATIONSHIPS WITH SAME LABEL, NAME, AND DIRECTION
