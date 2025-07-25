@@ -91,17 +91,11 @@ RETURN
     }] AS merge_details
 """
 
-RELATIONSHIP_NORMALIZATION_QUERY = """
-// Relationship Normalization for Entity E
+MERGE_DUPLICATE_RELATIONSHIPS_QUERY = """
 MATCH (e:Entity)
 WHERE e.id = $source_entity_id
 
-// =============================================================================
-// 1. MERGE RELATIONSHIPS WITH SAME LABEL, NAME, AND DIRECTION
-// =============================================================================
-
 // Handle outgoing relationships from E
-WITH e
 MATCH (e)-[r]->(target)
 WITH e, target, type(r) as rel_type, r.name as rel_name,
      collect(r) as same_rels
@@ -133,11 +127,13 @@ SET keep_rel.merged_at = datetime()
 
 FOREACH (rel IN delete_rels | DELETE rel)
 
-// =============================================================================
-// 2. MERGE MULTIPLE "MENTIONS" RELATIONSHIPS FROM REFERENCE NODES
-// =============================================================================
+RETURN count(*) as duplicate_relationships_merged
+"""
 
-WITH e
+MERGE_MENTION_RELATIONSHIPS_QUERY = """
+MATCH (e:Entity)
+WHERE e.id = $source_entity_id
+
 MATCH (ref:Reference)-[mentions:MENTIONS]-(e)
 WITH e, collect(mentions) as all_mentions
 WHERE size(all_mentions) > 1
@@ -153,18 +149,20 @@ SET primary_mention.merged_at = datetime()
 // Delete other mention relationships
 FOREACH (rel IN other_mentions | DELETE rel)
 
-// =============================================================================
-// 3. MERGE RELATIONSHIPS WITH SAME LABEL AND SIMILAR EMBEDDINGS
-// =============================================================================
+RETURN count(*) as mention_relationships_merged
+"""
 
-WITH e
+MERGE_SIMILAR_EMBEDDING_RELATIONSHIPS_QUERY = """
+MATCH (e:Entity)
+WHERE e.id = $source_entity_id
+
 // Find relationships with embeddings (outgoing)
 MATCH (e)-[r1]->(target)
 WHERE r1.embedding IS NOT NULL
 MATCH (e)-[r2]->(target)
 WHERE r2.embedding IS NOT NULL
-  AND id(r1) < id(r2)  // Avoid duplicate comparisons
-  AND type(r1) = type(r2)  // Same relationship type
+  AND elementId(r1) < elementId(r2)
+  AND type(r1) = type(r2)
 
 // Calculate cosine similarity between embeddings
 WITH e, target, r1, r2,
@@ -192,7 +190,7 @@ MATCH (source)-[r1]->(e)
 WHERE r1.embedding IS NOT NULL
 MATCH (source)-[r2]->(e)
 WHERE r2.embedding IS NOT NULL
-  AND id(r1) < id(r2)
+  AND elementId(r1) < elementId(r2)
   AND type(r1) = type(r2)
 
 WITH e, source, r1, r2,
@@ -209,4 +207,6 @@ SET keep_rel.embedding_merged = true,
     keep_rel.merged_at = datetime()
 
 DELETE merge_rel
+
+RETURN count(*) as embedding_relationships_merged
 """
