@@ -51,7 +51,8 @@ WHERE combined_score > $combined_score_threshold\
      OR string_similarity > $string_similarity_threshold
 WITH e1, collect(e2) AS nodes_to_merge,
      collect({
-         node: e2,
+         node_id: e2.id,  // Collect ID before merging
+         node_name: e2.name,  // Collect name before merging
          combined_score: combined_score,
          semantic_score: semantic_score,
          string_similarity: string_similarity,
@@ -77,18 +78,12 @@ CALL apoc.refactor.mergeNodes(all_nodes, {
 })
 YIELD node AS merged_node
 
-// Return results
+// Return results using pre-collected data
 RETURN
     merged_node.id AS entity_id,
     merged_node AS entity,
     size(nodes_to_merge) AS nodes_merged_count,
-    [detail IN merge_details | {
-        merged_node_id: detail.node.id,
-        combined_score: detail.combined_score,
-        semantic_score: detail.semantic_score,
-        string_similarity: detail.string_similarity,
-        topology_similarity: detail.topology_similarity
-    }] AS merge_details
+    merge_details
 """
 
 MERGE_DUPLICATE_RELATIONSHIPS_QUERY = """
