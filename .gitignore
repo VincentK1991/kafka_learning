@@ -26,6 +26,7 @@ MANIFEST
 venv/
 ENV/
 env/
+notebook/
 
 # IDEs
 .vscode/
@@ -63,5 +64,5 @@ Thumbs.db
 .dockerignore
 
 # uv
-# Note: uv.lock should be committed for reproducible builds 
+# Note: uv.lock should be committed for reproducible builds
 *.ipynb

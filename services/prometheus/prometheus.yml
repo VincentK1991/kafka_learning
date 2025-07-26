@@ -6,35 +6,33 @@ rule_files:
   - "prometheus-rules.yml"
 
 scrape_configs:
-  # Prometheus itself
   - job_name: 'prometheus'
     static_configs:
       - targets: ['localhost:9090']
 
-  # Producer API metrics
-  - job_name: 'kafka-producer-api'
+  - job_name: 'ingestion-api'
     static_configs:
-      - targets: ['producer-api:8001']
+      - targets: ['host.docker.internal:8001']
     metrics_path: '/metrics'
-    scrape_interval: 5s
-    scrape_timeout: 5s
 
-  # Consumer API metrics
-  - job_name: 'kafka-consumer-api'
+  - job_name: 'extraction-service'
     static_configs:
-      - targets: ['consumer-api:8002']
+      # List multiple potential ports for scaled extraction services
+      - targets: 
+        - 'host.docker.internal:8002' # Default
+        - 'host.docker.internal:8004' # First scaled instance
+        - 'host.docker.internal:8005' # Second scaled instance
     metrics_path: '/metrics'
-    scrape_interval: 5s
-    scrape_timeout: 5s
 
-  # Kafka metrics (if JMX exporter is enabled)
-  - job_name: 'kafka'
+  - job_name: 'normalization-service'
     static_configs:
-      - targets: ['kafka:9101']
-    scrape_interval: 30s
+      - targets: ['host.docker.internal:8003']
+    metrics_path: '/metrics'
 
-  # System metrics (if node exporter is added)
+  - job_name: 'kafka-exporter'
+    static_configs:
+      - targets: ['kafka-exporter:9308']
+
   - job_name: 'node-exporter'
     static_configs:
       - targets: ['node-exporter:9100']
-    scrape_interval: 15s 

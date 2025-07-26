@@ -96,3 +96,93 @@ This service is the last step in the happy path, so its main job is to trigger r
 -   **Action**:
     -   Create a new service that consumes from all relevant topics (`extraction`, `extraction_rollback`, etc.).
     -   This service would build and maintain a state machine in a database (e.g., PostgreSQL or a dedicated collection in Neo4j) to track the status of each `saga_id`: `IN_PROGRESS`, `COMPLETED`, `FAILED`, `ROLLED_BACK`.
+
+---
+## Observability and Monitoring Plan
+
+This section details how to leverage the existing Prometheus and Grafana setup to build comprehensive monitoring for the pipeline.
+
+### Step 1: Instrument Python Services with Metrics
+
+The most critical step is to make our Python services expose metrics that Prometheus can scrape.
+
+-   **Library**: Add `prometheus-client` to `pyproject.toml` and run `uv sync`.
+-   **Action**: In each of the three services (`text_ingestion_api`, `extraction_api`, `normalization_api`), expose a `/metrics` endpoint. For FastAPI, this is straightforward. For the consumer services, you can run the metrics server in a separate thread.
+
+-   **Metrics to Expose**:
+    -   **Counter**: `pipeline_messages_total{service, status}`
+        -   `service`: "extraction", "normalization", etc.
+        -   `status`: "success" or "failure".
+        -   *Increment this for every message processed.*
+    -   **Histogram**: `pipeline_processing_duration_seconds{service}`
+        -   *Record the time it takes to process each message.*
+    -   **Counter**: `pipeline_rollbacks_total{service}`
+        -   *Increment when a rollback is initiated or processed.*
+    -   **Gauge**: `kafka_consumer_lag{group_id, topic, partition}`
+        -   *Expose the consumer lag. `aiokafka` provides ways to get this information.*
+
+### Step 2: Add a Kafka Exporter
+
+The JMX port (`9101`) provides deep metrics, but it's easier to use a dedicated Kafka exporter that translates these into a Prometheus-friendly format.
+
+-   **Action**: Add a Kafka exporter service to `docker-compose.neo4j_infrastructure.yml`.
+    ```yaml
+    services:
+      # ... other services
+      kafka-exporter:
+        image: danielqsj/kafka-exporter:v1.7.0
+        container_name: kafka-exporter
+        command: --kafka.server=kafka:29092
+        ports:
+          - "9308:9308"
+        networks:
+          - kafka-network
+        restart: unless-stopped
+    ```
+-   **Action**: Update `services/prometheus/prometheus.yml` to scrape this new service.
+    ```yaml
+    # In scrape_configs:
+    - job_name: 'kafka-exporter'
+      static_configs:
+        - targets: ['kafka-exporter:9308']
+    ```
+
+### Step 3: Add a Neo4j Exporter
+
+To get insights into the database, we need to expose its metrics.
+
+-   **Action**: Add the official Neo4j Prometheus plugin. In `docker-compose.neo4j_infrastructure.yml`, modify the `neo4j` service environment variables:
+    ```yaml
+    # In the neo4j service:
+    environment:
+      NEO4J_AUTH: "neo4j/password"
+      NEO4J_PLUGINS: '["apoc", "graph-data-science", "prometheus"]' # Add prometheus
+      NEO4J_ACCEPT_LICENSE_AGREEMENT: "yes"
+      # Add this line to enable the exporter endpoint
+      NEO4J_metrics_prometheus_enabled: "true"
+    ```
+-   **Action**: Update `services/prometheus/prometheus.yml` to scrape Neo4j.
+    ```yaml
+    # In scrape_configs:
+    - job_name: 'neo4j'
+      static_configs:
+        - targets: ['neo4j:2004'] # Default port for the Neo4j exporter
+    ```
+
+### Step 4: Build a Custom Grafana Dashboard
+
+With all the new metrics available, create a dedicated dashboard to visualize the pipeline's health.
+
+-   **File**: Create a new JSON file in `grafana/dashboards/pipeline.json`.
+-   **Action**: Add panels to the dashboard:
+    1.  **Pipeline Health**:
+        -   **Messages Processed**: A graph showing the `rate()` of `pipeline_messages_total` for each service, faceted by `status`. This gives you a quick look at throughput and error rates.
+        -   **Processing Latency**: A heatmap or histogram of `pipeline_processing_duration_seconds` (e.g., p95, p99) for each service.
+    2.  **Kafka Monitoring**:
+        -   **Consumer Lag**: A graph of `kafka_consumergroup_lag` from the Kafka exporter, showing how far behind each consumer group is. This is the most important metric for queue health.
+        -   **Topic Throughput**: A graph of `kafka_topic_partitions_messages` to see the rate of messages being written to each topic.
+    3.  **Saga & Rollbacks**:
+        -   **Rollback Rate**: A graph showing the `rate()` of `pipeline_rollbacks_total`. Any number greater than zero here deserves attention.
+    4.  **Neo4j Health**:
+        -   **Transaction Rate**: A graph of `neo4j_transaction_total` from the Neo4j exporter.
+        -   **Database Size**: Gauges for `neo4j_store_size_total_bytes` and counts for nodes and relationships.
