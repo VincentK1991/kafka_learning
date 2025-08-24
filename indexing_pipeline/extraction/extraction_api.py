@@ -2,9 +2,9 @@ import asyncio
 import json
 import os
 import time
-from prometheus_client import start_http_server
 
 from aiokafka import AIOKafkaConsumer, AIOKafkaProducer
+from prometheus_client import start_http_server
 
 from indexing_pipeline.extraction.embedding.index_function import create_indices
 from indexing_pipeline.extraction.extraction_functions import extract_embed_index_data
@@ -20,9 +20,9 @@ async def extraction_pipeline():
         group_id="extraction_group",
     )
     producer = AIOKafkaProducer(bootstrap_servers=config.KAFKA_BOOTSTRAP_SERVERS)
-    
+
     # Allow metrics port to be configurable
-    metrics_port = int(os.environ.get('METRICS_PORT', 8002))
+    metrics_port = int(os.environ.get("METRICS_PORT", 8002))
     start_http_server(metrics_port)
     print(f"Prometheus server started on port {metrics_port}")
 
@@ -49,15 +49,15 @@ async def extraction_pipeline():
                 )
 
                 print(f"✅ Finished processing: {message_data['title']}")
-                MESSAGES_PROCESSED.labels(service='extraction', status='success').inc()
+                MESSAGES_PROCESSED.labels(service="extraction", status="success").inc()
 
             except Exception as e:
                 print(f"❌ Error processing message: {e}")
-                MESSAGES_PROCESSED.labels(service='extraction', status='failure').inc()
+                MESSAGES_PROCESSED.labels(service="extraction", status="failure").inc()
                 # Continue processing other messages
             finally:
                 duration = time.time() - start_time
-                PROCESSING_TIME.labels(service='extraction').observe(duration)
+                PROCESSING_TIME.labels(service="extraction").observe(duration)
 
     finally:
         await consumer.stop()

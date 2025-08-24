@@ -1,6 +1,6 @@
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import Field
 
 from indexing_pipeline.extraction.ontology.meta_graph import (
     BaseRelationship,
@@ -130,7 +130,7 @@ class CompanyReportsFinancialInformation(BaseRelationship):
     )
 
 
-financial_schema: type[BaseModel] = (
+financial_schema = (
     CompanyReportsFinancialInformation
     | CompanyOperatesInMarket
     | CompanyUsesTechnology

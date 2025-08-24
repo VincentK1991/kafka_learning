@@ -73,9 +73,10 @@ class BaseEntity(NodeBase):
     label: Literal["Entity"]
     name: str = Field(..., description="The specific name/identifier of the node")
     description: str = Field(
-        ..., description="The description of the entity,\
+        ...,
+        description="The description of the entity,\
              should be specific and descriptive such that it can be used to\
-             understand what the entity is"
+             understand what the entity is",
     )
 
     async def to_cypher(self, id: str, reference_id: str) -> tuple[str, dict[str, Any]]:
@@ -86,11 +87,11 @@ class BaseEntity(NodeBase):
         properties.update({"embedding": embedding[0]})
         properties.update({"id": id})
 
-        # Note: sub_label would need to be dynamically set
-        # since it's not defined in the class
+        # Get sub_label dynamically since it's defined in subclasses
+        sub_label = getattr(self, "sub_label", "Entity")
         cypher_query = f"""
         MERGE (r:Reference {{id: $reference_id}})
-        MERGE (n:{self.label}:{self.sub_label} {{name: $name}})
+        MERGE (n:{self.label}:{sub_label} {{name: $name}})
         ON CREATE SET
           n += $properties
         ON MATCH SET
@@ -118,8 +119,8 @@ class BaseRelationship(NodeBase):
              should be specific and descriptive such that it can be used to\
              understand the relationship between the entities",
     )
-    source_entity: BaseEntity
-    target_entity: BaseEntity
+    source_entity: Any  # Allow subclasses to override with specific entity types
+    target_entity: Any  # Allow subclasses to override with specific entity types
 
     async def to_cypher(
         self, source_id: str, target_id: str
@@ -158,9 +159,9 @@ class BaseRelationship(NodeBase):
         )
 
 
-def schema_factory(schema: type[BaseModel]) -> type[BaseModel]:
+def schema_factory(schema: Any) -> type[BaseModel]:
     class Graph(BaseModel):
-        extracted_graphs: list[schema]
+        extracted_graphs: list[schema]  # type: ignore
 
         async def to_cypher(
             self, reference_id: str

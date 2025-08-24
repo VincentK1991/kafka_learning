@@ -8,14 +8,35 @@ from indexing_pipeline.extraction.chunking import chunk_text
 from indexing_pipeline.extraction.embedding.embedding import embed_text
 from indexing_pipeline.extraction.extraction_models import (
     ChunkWithEmbedding,
+    DomainOntology,
     ExtractedDataWithEmbedding,
     TextContent,
     TextContentWithChunks,
     TextContentWithChunksAndEmbedding,
+    get_graph_class,
 )
-from indexing_pipeline.extraction.ontology.finance.relationships import FinancialGraph
-from indexing_pipeline.extraction.ontology.meta_graph import Reference, ReferenceChunk
+from indexing_pipeline.extraction.ontology.meta_graph import (
+    Reference,
+    ReferenceChunk,
+)
 from shared.neo4j import get_neo4j_connector
+
+
+def create_domain_classifier_agent():
+    agent = Agent(
+        name="domain_classifier_agent",
+        instructions="""
+classify the text into a domain ontology.
+    """,
+        output_type=DomainOntology,
+        model="gpt-4.1-mini",
+    )
+
+    async def run(user_message: str):
+        result = await Runner.run(agent, user_message)
+        return result.final_output
+
+    return run
 
 
 def create_extraction_agent_with_ontology(schema: type[BaseModel]):
@@ -53,11 +74,10 @@ def create_extraction_agent_with_ontology(schema: type[BaseModel]):
     return run
 
 
-financial_extraction_function = create_extraction_agent_with_ontology(FinancialGraph)
-
-
-def create_text_content(title: str, text: str) -> TextContent:
-    return TextContent(content=text, name=title)
+async def create_text_content(title: str, text: str) -> TextContent:
+    classifier_agent = create_domain_classifier_agent()
+    domain = await classifier_agent(text)
+    return TextContent(content=text, name=title, domain=domain)
 
 
 def chunk_data(text_content: TextContent) -> TextContentWithChunks:
@@ -67,6 +87,7 @@ def chunk_data(text_content: TextContent) -> TextContentWithChunks:
         content=text_content.content,
         chunks=chunks,
         name=text_content.name,
+        domain=text_content.domain,
     )
 
 
@@ -85,6 +106,7 @@ async def embed_chunks(
         name=text_content_with_chunks.name,
         content=text_content_with_chunks.content,
         chunks_with_embedding=chunks_with_embedding,
+        domain=text_content_with_chunks.domain,
     )
 
 
@@ -93,14 +115,16 @@ async def extract_entity_relationship(
 ) -> ExtractedDataWithEmbedding:
     """Transform the data to a pandas dataframe."""
     tasks = []
+    graph_class = get_graph_class(text_content_with_chunks.domain)
+    extraction_function = create_extraction_agent_with_ontology(graph_class)
     for chunk_with_embedding in text_content_with_chunks.chunks_with_embedding:
-        tasks.append(financial_extraction_function(chunk_with_embedding.chunk))
-    financial_graphs = await asyncio.gather(*tasks)
+        tasks.append(extraction_function(chunk_with_embedding.chunk))
+    extracted_graphs = await asyncio.gather(*tasks)
     return ExtractedDataWithEmbedding(
         name=text_content_with_chunks.name,
         content=text_content_with_chunks.content,
         chunks_with_embedding=text_content_with_chunks.chunks_with_embedding,
-        extracted_graphs=financial_graphs,
+        extracted_graphs=extracted_graphs,
     )
 
 
@@ -162,7 +186,7 @@ async def extract_embed_index_data(title: str, content: str) -> dict[str, Any]:
     perform extraction, chunking, embedding, entity relationship extraction,
     and index the data to database.
     """
-    text_content = create_text_content(title, content)
+    text_content = await create_text_content(title, content)
     text_content_with_chunks = chunk_data(text_content)
     text_content_with_chunks_and_embedding = await embed_chunks(
         text_content_with_chunks
