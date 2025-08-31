@@ -14,6 +14,7 @@ from indexing_pipeline.extraction.ontology.finance.relationships import (
 class DomainOntology(Enum):
     FINANCE = "finance"
     AI_RESEARCH = "ai_research"
+    PHILOSOPHY = "philosophy"
 
 
 # Mapping from domain ontology to their corresponding graph classes

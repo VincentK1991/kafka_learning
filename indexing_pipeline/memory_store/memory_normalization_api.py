@@ -6,9 +6,9 @@ import time
 from aiokafka import AIOKafkaConsumer
 from prometheus_client import start_http_server
 
-from indexing_pipeline.normalization.normalization_functions import (
-    check_entity_exists,
-    normalize_entity,
+from indexing_pipeline.memory_store.memory_normalization_functions import (
+    check_memory_exists,
+    normalize_memory,
     normalize_relationship,
 )
 from shared.config import get_config
@@ -19,9 +19,9 @@ config = get_config()
 
 async def normalization_pipeline():
     consumer = AIOKafkaConsumer(
-        config.KAFKA_EXTRACTION_TOPIC,
+        config.KAFKA_MEMORY_STORE_TOPIC,
         bootstrap_servers=config.KAFKA_BOOTSTRAP_SERVERS,
-        group_id="normalization_group",
+        group_id="memory_normalization_group",
     )
 
     # Allow metrics port to be configurable
@@ -39,16 +39,16 @@ async def normalization_pipeline():
                 message_data = json.loads(msg.value.decode("utf-8"))
                 print(f"Processing message: {message_data['entity_ids']}")
 
-                for entity_id in message_data["entity_ids"]:
-                    print(f"Processing entity: {entity_id}")
-                    exists = await check_entity_exists(entity_id)
+                for memory_id in message_data["entity_ids"]:
+                    print(f"Processing entity: {memory_id}")
+                    exists = await check_memory_exists(memory_id)
                     if exists:
-                        _ = await normalize_entity(entity_id)
-                    exists = await check_entity_exists(entity_id)
+                        _ = await normalize_memory(memory_id)
+                    exists = await check_memory_exists(memory_id)
                     if exists:
-                        _ = await normalize_relationship(entity_id)
+                        _ = await normalize_relationship(memory_id)
 
-                print(f"✅ Finished processing: {message_data['entity_ids']}")
+                print(f"✅ Finished processing: {message_data['memory_ids']}")
                 MESSAGES_PROCESSED.labels(
                     service="normalization", status="success"
                 ).inc()

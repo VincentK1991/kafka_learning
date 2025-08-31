@@ -18,6 +18,10 @@ class Config:
     KAFKA_TEXT_INGESTION_TOPIC = os.getenv(
         "KAFKA_TEXT_INGESTION_TOPIC", "text_ingestion"
     )
+    KAFKA_MEMORY_INGESTION_TOPIC = os.getenv(
+        "KAFKA_MEMORY_INGESTION_TOPIC", "memory_ingestion"
+    )
+    KAFKA_MEMORY_STORE_TOPIC = os.getenv("KAFKA_MEMORY_STORE_TOPIC", "memory_store")
     KAFKA_EXTRACTION_TOPIC = os.getenv("KAFKA_EXTRACTION_TOPIC", "extraction")
     KAFKA_NORMALIZATION_TOPIC = os.getenv("KAFKA_NORMALIZATION_TOPIC", "normalization")
 
